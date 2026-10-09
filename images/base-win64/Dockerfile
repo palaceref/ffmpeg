@@ -4,6 +4,7 @@ FROM $GH_REPO/base:latest${BASE_TAG_SUFFIX}
 
 RUN --mount=src=ct-ng-config,dst=/.config \
     git clone --filter=blob:none https://github.com/crosstool-ng/crosstool-ng.git /ct-ng && cd /ct-ng && \
+    git checkout f697d16bd70b3e4a3499b7f2a153860f41964f72 && \
     ./bootstrap && \
     ./configure --enable-local && \
     make -j$(nproc) && \

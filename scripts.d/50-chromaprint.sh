@@ -9,6 +9,8 @@ ffbuild_depends() {
 }
 
 ffbuild_enabled() {
+    # Built on FFTW, which is GPL: never in the LGPL variants PalaceRef ships.
+    [[ $VARIANT == lgpl* ]] && return -1
     (( $(ffbuild_ffver) >= 600 )) || return -1
     return 0
 }

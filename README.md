@@ -1,3 +1,26 @@
+# FFmpeg for PalaceRef
+
+This fork of [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) builds the FFmpeg that
+PalaceRef ships: BtbN's `win64` `lgpl-shared` `8.1` build, from the same recipes, with three changes
+on the `palaceref` branch:
+
+- **No GPL code in LGPL builds.** BtbN's LGPL variants linked FFTW (GPL, through chromaprint) into
+  `avformat` and a GPL-2.0-only zvbi file into `avcodec`. `scripts.d/25-fftw3.sh`,
+  `50-chromaprint.sh` and `50-zvbi.sh` are disabled for LGPL variants, as BtbN does for its other
+  GPL-only libraries; FFmpeg is configured with `--disable-chromaprint --disable-libzvbi`.
+- **Pinned.** FFmpeg is built from the `n8.1.3` tag (`addins/8.1.sh`), not the branch head;
+  crosstool-NG and Rust are pinned to what BtbN used on 2026-09-24; every library stays at the
+  commit its `scripts.d` stage pins.
+- **One build, kept.** `.github/workflows/build.yml` builds only that variant, fails if FFTW,
+  chromaprint or zvbi reach the binaries, and on a manual run with "Publish release" releases it
+  with FFmpeg's source and every library's source (`source-*`). Releases are never pruned: each is
+  the source offer for a PalaceRef version that shipped it.
+
+To update FFmpeg, merge BtbN's `master`, change the tag in `addins/8.1.sh`, push, and run the
+workflow with "Publish release"; then point PalaceRef's `scripts\ffmpeg-build.ps1` at the release.
+
+The rest of this file is BtbN's.
+
 # FFmpeg Static Auto-Builds
 
 Static Windows (x86_64) and Linux (x86_64) Builds of ffmpeg master and latest release branch.

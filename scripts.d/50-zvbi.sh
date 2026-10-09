@@ -9,6 +9,8 @@ ffbuild_depends() {
 }
 
 ffbuild_enabled() {
+    # GPL code (src/packet-830.c is GPL-2.0-only): never in the LGPL variants PalaceRef ships.
+    [[ $VARIANT == lgpl* ]] && return -1
     return 0
 }
 

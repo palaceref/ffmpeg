@@ -1,63 +1,40 @@
-name: Build FFmpeg
+name: Build FFmpeg for PalaceRef
 
+# One build: win64, LGPL, shared libraries, FFmpeg 8.1 (addins/8.1.sh pins the
+# tag). Pushes to the palaceref branch build it to check a change; a manual run
+# with "Publish release" also releases it, with the source of everything in it.
 on:
   push:
+    branches: [palaceref]
     paths-ignore:
       - '**.md'
       - 'LICENSE'
   workflow_dispatch:
     inputs:
       doRelease:
-        description: 'Publish new release'
+        description: 'Publish a release'
         type: boolean
         default: false
-        required: false
       buildOnly:
-        description: 'Only build ffmpeg'
+        description: 'Only build ffmpeg, reusing the images'
         type: boolean
         default: false
-        required: false
-  schedule:
-    - cron: '0 12 * * *'
+
+permissions:
+  contents: write  # Releases.
+  packages: write  # The build images in ghcr.io.
 
 env:
   DOCKER_BUILDKIT: 1
+  TARGET: win64
+  VARIANT: lgpl-shared
+  ADDIN: '8.1'
 
 jobs:
-  pre_check:
-    name: Pre Checks
-    if: ${{ github.event.inputs.buildOnly != 'true' }}
-    runs-on: ubuntu-slim
-    steps:
-      - name: Repo Check
-        if: ${{ github.event_name == 'schedule' }}
-        run: |
-          if [[ "$GITHUB_REPOSITORY" != "BtbN/FFmpeg-Builds" ]]; then
-            echo "When forking this repository to make your own builds, you have to adjust this check."
-            echo "When doing so make sure to randomize the scheduled cron time above, in order to spread out the various build times as much as possible."
-            echo "This has been put in place due to the enormous amounts of traffic hundreds/thousands of parallel builds can cause on external infrastructure."
-            # Set Github job summary (see https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#adding-a-job-summary):
-            echo "# To enable scheduled builds, please make the following 2 edits to [.github/workflows/build.yml](https://github.com/$GITHUB_REPOSITORY/edit/$GITHUB_REF_NAME/.github/workflows/build.yml):" >> "$GITHUB_STEP_SUMMARY"
-            echo '1. **IMPORTANT:** Change the 2 numbers on the `cron:` line. The first number must be between 0 and 59, and the second must be between 0 and 23.' >> "$GITHUB_STEP_SUMMARY"
-            echo '2. Use `find and replace` (ctrl+f) to replace `BtbN/FFmpeg-Builds` with your repository name' >> "$GITHUB_STEP_SUMMARY"
-            echo  >> "$GITHUB_STEP_SUMMARY" # adds blank line to markdown
-            echo "This safeguard exists to  avoid overwhelming important open-source infrastructure (see https://github.com/BtbN/FFmpeg-Builds/issues/278)" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          exit 0
   build_base:
     name: Build base image
     if: ${{ github.event.inputs.buildOnly != 'true' }}
-    needs: pre_check
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            tag_suffix: ''
-          - runner: ubuntu-26.04-arm
-            tag_suffix: -arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -75,30 +52,23 @@ jobs:
           password: ${{ github.token }}
       - name: Image Name
         id: imagename
-        run: |
-          IMG="${GITHUB_REPOSITORY,,}/base"
-          IMG="${IMG// /-}"
-          echo "name=ghcr.io/${IMG}" >> $GITHUB_OUTPUT
-          echo "rawname=${IMG#*/}" >> $GITHUB_OUTPUT
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/base" >> $GITHUB_OUTPUT
       - name: Stop Commands
         run: T="$(echo -n ${{ github.token }} | sha256sum | head -c 64)" && echo -e "::add-mask::${T}\n::stop-commands::${T}"
-      - name: Build target base image
+      - name: Build base image
         uses: docker/build-push-action@v7
         with:
           context: images/base
           pull: true
           push: true
           provenance: false
-          tags: ${{ steps.imagename.outputs.name }}:latest${{ matrix.tag_suffix || '' }}
-          cache-to: type=registry,mode=max,ref=${{ steps.imagename.outputs.name }}:cache${{ matrix.tag_suffix || '' }}
-          cache-from: type=registry,ref=${{ steps.imagename.outputs.name }}:cache${{ matrix.tag_suffix || '' }}
+          tags: ${{ steps.imagename.outputs.name }}:latest
+          cache-to: type=registry,mode=max,ref=${{ steps.imagename.outputs.name }}:cache
+          cache-from: type=registry,ref=${{ steps.imagename.outputs.name }}:cache
       - name: Get download cache key
-        if: ${{ !cancelled() && !contains(matrix.runner, 'arm') }}
         id: dl_cache
-        run: |
-          echo "dltagname=$(./util/get_dl_cache_tag.sh)" >> $GITHUB_OUTPUT
+        run: echo "dltagname=$(./util/get_dl_cache_tag.sh)" >> $GITHUB_OUTPUT
       - name: Cache
-        if: ${{ !cancelled() && !contains(matrix.runner, 'arm') }}
         uses: actions/cache@v6
         with:
           path: .cache/downloads
@@ -106,52 +76,23 @@ jobs:
           restore-keys: |
             download-cache-
       - name: Update Cache
-        if: ${{ !cancelled() && !contains(matrix.runner, 'arm') }}
         run: |
           set -e
           ./download.sh
           ./util/clean_cache.sh
           tar czf .cache/cache.tar.gz .cache/downloads/*
       - name: Upload cache artifact
-        if: ${{ !cancelled() && !contains(matrix.runner, 'arm') }}
         uses: actions/upload-artifact@v7
         with:
           name: download-cache
           overwrite: true
           path: .cache/cache.tar.gz
-      - name: Cleanup
-        continue-on-error: true
-        uses: BtbN/delete-untagged-ghcr-action@main
-        with:
-          token: ${{ github.token }}
-          package_name: ${{ steps.imagename.outputs.rawname }}
-          repository_owner: ${{ github.repository_owner }}
-          repository: ${{ github.repository }}
-          owner_type: user
-          untagged_only: true
-  build_target_bases:
+
+  build_target_base:
     name: Build target base image
     if: ${{ github.event.inputs.buildOnly != 'true' }}
     needs: build_base
-    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest]
-        target: [win32,win64,winarm64,linux32,linux64,linuxarm64,linuxppc64,linuxmips64,linuxriscv64]
-        include:
-          - runner: ubuntu-26.04-arm
-            target: linuxarm64
-            tag_suffix: -arm
-          - runner: ubuntu-26.04-arm
-            target: linuxppc64
-            tag_suffix: -arm
-          - runner: ubuntu-26.04-arm
-            target: linuxmips64
-            tag_suffix: -arm
-          - runner: ubuntu-26.04-arm
-            target: linuxriscv64
-            tag_suffix: -arm
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -170,79 +111,28 @@ jobs:
       - name: Image Name
         id: imagename
         run: |
-          IMG="${GITHUB_REPOSITORY,,}/base-${{ matrix.target }}"
-          IMG="${IMG// /-}"
-          echo "name=ghcr.io/${IMG}" >> $GITHUB_OUTPUT
-          echo "rawname=${IMG#*/}" >> $GITHUB_OUTPUT
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/base-${TARGET}" >> $GITHUB_OUTPUT
           echo "gh_repo=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
       - name: Stop Commands
         run: T="$(echo -n ${{ github.token }} | sha256sum | head -c 64)" && echo -e "::add-mask::${T}\n::stop-commands::${T}"
       - name: Build target base image
         uses: docker/build-push-action@v7
         with:
-          context: images/base-${{ matrix.target }}
+          context: images/base-${{ env.TARGET }}
           pull: true
           push: true
           provenance: false
-          tags: ${{ steps.imagename.outputs.name }}:latest${{ matrix.tag_suffix || '' }}
-          cache-to: type=registry,mode=max,ref=${{ steps.imagename.outputs.name }}:cache${{ matrix.tag_suffix || '' }}
-          cache-from: type=registry,ref=${{ steps.imagename.outputs.name }}:cache${{ matrix.tag_suffix || '' }}
+          tags: ${{ steps.imagename.outputs.name }}:latest
+          cache-to: type=registry,mode=max,ref=${{ steps.imagename.outputs.name }}:cache
+          cache-from: type=registry,ref=${{ steps.imagename.outputs.name }}:cache
           build-args: |
             GH_REPO=ghcr.io/${{ steps.imagename.outputs.gh_repo }}
-            BASE_TAG_SUFFIX=${{ matrix.tag_suffix || '' }}
-      - name: Cleanup
-        continue-on-error: true
-        uses: BtbN/delete-untagged-ghcr-action@main
-        with:
-          token: ${{ github.token }}
-          package_name: ${{ steps.imagename.outputs.rawname }}
-          repository_owner: ${{ github.repository_owner }}
-          repository: ${{ github.repository }}
-          owner_type: user
-          untagged_only: true
-  build_targets:
+
+  build_target:
     name: Build target-variant image
     if: ${{ github.event.inputs.buildOnly != 'true' }}
-    needs: build_target_bases
-    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest]
-        target: [win64,winarm64,linux64,linuxarm64]
-        variant: [gpl,lgpl,gpl 8.1,gpl 9.0,lgpl 8.1,lgpl 9.0,gpl-shared,lgpl-shared,gpl-shared 8.1,gpl-shared 9.0,lgpl-shared 8.1,lgpl-shared 9.0]
-        include:
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 8.0
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 7.1
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 7.0
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 6.1
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 6.0
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 5.1
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 5.0
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 4.4
-          - runner: ubuntu-latest
-            target: win64
-            variant: gpl 4.3
-          - runner: ubuntu-26.04-arm
-            target: linuxarm64
-            variant: gpl
-            tag_suffix: -arm
+    needs: build_target_base
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -260,55 +150,36 @@ jobs:
           password: ${{ github.token }}
       - name: Image Name
         id: imagename
-        run: |
-          IMG="${GITHUB_REPOSITORY,,}/${{ matrix.target }}-${{ matrix.variant }}"
-          IMG="${IMG// /-}"
-          echo "name=ghcr.io/${IMG}" >> $GITHUB_OUTPUT
-          echo "rawname=${IMG#*/}" >> $GITHUB_OUTPUT
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/${TARGET}-${VARIANT}-${ADDIN}" >> $GITHUB_OUTPUT
       - name: Get download cache key
         id: dl_cache
-        run: |
-          echo "dltagname=$(DOCKER_TAG_SUFFIX=${{ matrix.tag_suffix || '' }} ./util/get_dl_cache_tag.sh)" >> $GITHUB_OUTPUT
+        run: echo "dltagname=$(./util/get_dl_cache_tag.sh)" >> $GITHUB_OUTPUT
       - name: Stop Commands
         run: T="$(echo -n ${{ github.token }} | sha256sum | head -c 64)" && echo -e "::add-mask::${T}\n::stop-commands::${T}"
       - name: Generate Dockerfile
-        run: DOCKER_TAG_SUFFIX=${{ matrix.tag_suffix || '' }} ./generate.sh ${{ matrix.target }} ${{ matrix.variant }}
+        run: ./generate.sh "$TARGET" "$VARIANT" "$ADDIN"
       - name: Cache
         uses: actions/cache/restore@v6
         with:
           path: .cache/downloads
           key: download-cache-${{ steps.dl_cache.outputs.dltagname }}
           fail-on-cache-miss: true
-      - name: Build target base image
+      - name: Build target-variant image
         uses: docker/build-push-action@v7
         with:
           context: .
           pull: true
           push: true
           provenance: false
-          tags: ${{ steps.imagename.outputs.name }}:latest${{ matrix.tag_suffix || '' }}
-          cache-to: type=registry,mode=max,ref=${{ steps.imagename.outputs.name }}:cache${{ matrix.tag_suffix || '' }}
-          cache-from: type=registry,ref=${{ steps.imagename.outputs.name }}:cache${{ matrix.tag_suffix || '' }}
-      - name: Cleanup
-        continue-on-error: true
-        uses: BtbN/delete-untagged-ghcr-action@main
-        with:
-          token: ${{ github.token }}
-          package_name: ${{ steps.imagename.outputs.rawname }}
-          repository_owner: ${{ github.repository_owner }}
-          repository: ${{ github.repository }}
-          owner_type: user
-          untagged_only: true
+          tags: ${{ steps.imagename.outputs.name }}:latest
+          cache-to: type=registry,mode=max,ref=${{ steps.imagename.outputs.name }}:cache
+          cache-from: type=registry,ref=${{ steps.imagename.outputs.name }}:cache
+
   build_ffmpeg:
     name: Build ffmpeg
     if: ${{ ( github.event.inputs.buildOnly == 'true' && !cancelled() ) || success() }}
-    needs: build_targets
+    needs: build_target
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [win64,winarm64,linux64,linuxarm64]
-        variant: [gpl,lgpl,gpl 8.1,gpl 9.0,lgpl 8.1,lgpl 9.0,gpl-shared,lgpl-shared,gpl-shared 8.1,gpl-shared 9.0,lgpl-shared 8.1,lgpl-shared 9.0]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -323,72 +194,80 @@ jobs:
       - name: Build ffmpeg
         run: |
           T="$(echo -n ${{ github.token }} | sha256sum | head -c 64)" && echo -e "::add-mask::${T}\n::stop-commands::${T}"
-          ./build.sh ${{ matrix.target }} ${{ matrix.variant }}
-      - name: Replace spaces in string
-        id: strs
+          ./build.sh "$TARGET" "$VARIANT" "$ADDIN"
+      - name: Check for GPL code
+        # The reason this fork exists: fail rather than ship GPL code again.
+        # Markers only linked code carries (the configure line inside the
+        # binaries names chromaprint and zvbi too, in lower case).
         run: |
-          SLUG="${{ matrix.target }}-${{ matrix.variant }}"
-          echo "artifact_slug=${SLUG// /-}" >> $GITHUB_OUTPUT
+          set -e
+          cd artifacts
+          unzip -q -o ffmpeg-*.zip -d check
+          found="$(grep -a -o -h -E 'fftw-3[0-9.]*|fftw_wisdom|Chromaprint|Libzvbi' check/*/bin/*.dll check/*/bin/*.exe | sort -u || true)"
+          rm -rf check
+          if [ -n "$found" ]; then
+            echo "$found"
+            echo "::error::GPL components found in the build"
+            exit 1
+          fi
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ffmpeg-${{ steps.strs.outputs.artifact_slug }}
+          name: ffmpeg-build
           overwrite: true
           path: artifacts/*
+
   publish_release:
     name: Publish release
-    if: ${{ !cancelled() && ( github.event_name == 'schedule' || github.event.inputs.doRelease == 'true' ) && needs.build_ffmpeg.result == 'success' }}
+    if: ${{ !cancelled() && github.event.inputs.doRelease == 'true' && needs.build_ffmpeg.result == 'success' }}
     needs: build_ffmpeg
     runs-on: ubuntu-latest
     steps:
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libarchive-tools p7zip-full
       - name: Checkout
         uses: actions/checkout@v7
       - name: Free Disk-Space
         run: ./util/free_disk_space.sh
-      - name: Download artifacts
+      - name: Download build
         uses: actions/download-artifact@v8
         with:
-          pattern: ffmpeg-*
-          merge-multiple: true
+          name: ffmpeg-build
           path: artifacts
+      - name: Download sources
+        uses: actions/download-artifact@v8
+        with:
+          name: download-cache
+          path: sources-archive
+      - name: Gather sources
+        # The LGPL asks that the source of what ships stay available: FFmpeg at
+        # its tag, and every library at the commit the build used (the download
+        # cache holds one archive per scripts.d stage). The recipes are this
+        # repository at the release's tag.
+        run: |
+          set -e
+          mkdir sources
+          tar xzf sources-archive/cache.tar.gz
+          find .cache/downloads -type f -name '*.tar.xz' -exec sh -c 'cp "$1" "sources/source-$(basename "$1")"' _ {} \;
+          FFTAG="$(sed -n 's/^GIT_BRANCH="\(.*\)"/\1/p' addins/${ADDIN}.sh)"
+          curl -fsSL -o "sources/source-ffmpeg-${FFTAG}.tar.gz" "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFTAG}.tar.gz"
+          echo "FFTAG=${FFTAG}" >> $GITHUB_ENV
       - name: Create release
-        id: create_release
         run: |
           set -xe
-          shopt -s nullglob
-          RELDATE="$(date +'%Y-%m-%d %H:%M')"
-          NAME="Auto-Build $RELDATE"
-          TAGNAME="autobuild-$(date +'%Y-%m-%d-%H-%M')"
-          (cd artifacts && sha256sum *.{zip,tar.xz} > checksums.sha256)
-          ./util/release_body.sh "$TAGNAME" artifacts/*.{zip,tar.xz} > release_body.md
-          gh release create "$TAGNAME" --target "master" --title "$NAME" --notes-file release_body.md artifacts/*.{zip,tar.xz} artifacts/checksums.*
-          echo "tag_name=${TAGNAME}" >> $GITHUB_OUTPUT
-          echo "rel_date=${RELDATE}" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Update Latest
-        run: |
-          set -xe
-          shopt -s nullglob
-          mkdir latest_artifacts worktmpdir
-          sudo mount -o size=75%,uid="${UID}" -t tmpfs tmpfs ./worktmpdir
-          (cd worktmpdir && ../util/repack_latest.sh ../latest_artifacts ../artifacts/*.{zip,tar.xz})
-          (cd latest_artifacts && sha256sum *.{zip,tar.xz} > checksums.sha256)
-          NAME="Latest Auto-Build (${{ steps.create_release.outputs.rel_date }})"
-          TAGNAME="latest"
-          ./util/release_body.sh "$TAGNAME" latest_artifacts/*.{zip,tar.xz} > latest_body.md
-          gh release delete --cleanup-tag --yes "$TAGNAME" || true
-          sleep 15
-          gh release create "$TAGNAME" --target "master" --title "$NAME" --notes-file latest_body.md latest_artifacts/*
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Update Wiki
-        run: ./util/update_wiki.sh artifacts ${{ steps.create_release.outputs.tag_name }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Prune old releases
-        run: ./util/prunetags.sh
+          STAMP="$(date +'%Y%m%d-%H%M')"
+          TAGNAME="palaceref-${FFTAG}-${STAMP}"
+          ZIP="$(ls artifacts/*.zip)"
+          (cd artifacts && sha256sum *.zip > checksums.sha256)
+          (cd sources && sha256sum * >> ../artifacts/checksums.sha256)
+          {
+            echo "FFmpeg ${FFTAG} for PalaceRef: \`$(basename "$ZIP")\`"
+            echo
+            echo "BtbN's win64 LGPL shared build without its GPL components (chromaprint, FFTW, zvbi), built from this repository at ${GITHUB_SHA}."
+            echo
+            echo "SHA-256: \`$(sha256sum "$ZIP" | cut -d' ' -f1)\`"
+            echo
+            echo "Source: \`source-ffmpeg-${FFTAG}.tar.gz\` is FFmpeg's; each other \`source-*.tar.xz\` is one library's, at the commit its scripts.d stage pins; the build recipes are this release's \"Source code\" archive."
+          } > release_body.md
+          gh release create "$TAGNAME" --target "$GITHUB_SHA" --title "FFmpeg ${FFTAG} for PalaceRef (${STAMP})" \
+            --notes-file release_body.md "$ZIP" artifacts/checksums.sha256 sources/*
         env:
           GITHUB_TOKEN: ${{ github.token }}
