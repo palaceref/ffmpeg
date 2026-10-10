@@ -1,7 +1,7 @@
 # FFmpeg for PalaceRef
 
 This fork of [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) builds the FFmpeg that
-PalaceRef ships: BtbN's `win64` `lgpl-shared` `8.1` build, from the same recipes, with three changes
+PalaceRef ships: BtbN's `win64` `lgpl-shared` `8.1` build, from the same recipes, with four changes
 on the `palaceref` branch:
 
 - **No GPL code in LGPL builds.** BtbN's LGPL variants linked FFTW (GPL, through chromaprint) into
@@ -11,6 +11,11 @@ on the `palaceref` branch:
 - **Pinned.** FFmpeg is built from the `n8.1.3` tag (`addins/8.1.sh`), not the branch head;
   crosstool-NG and Rust are pinned to what BtbN used on 2026-09-24; every library stays at the
   commit its `scripts.d` stage pins.
+- **Upstream fixes.** `patches/ffmpeg/<tag>` holds FFmpeg commits from upstream `master` that the
+  tag lacks, as `git format-patch` files; `build.sh` applies them, uncommitted, so the version stays
+  the tag's. For `n8.1.3`: the D3D12 decoder sizes its bitstream upload buffers to each frame
+  (`9997fd060680`; each was a whole uncompressed frame), and hardware that needs reference-only
+  surfaces no longer runs out of reference slots (`bcd2c69e087a`).
 - **One build, kept.** `.github/workflows/palaceref.yml` builds only that variant, fails if FFTW,
   chromaprint or zvbi reach the binaries, and on a manual run with "Publish release" releases it
   with FFmpeg's source and every library's source (`source-*`). Releases are never pruned: each is

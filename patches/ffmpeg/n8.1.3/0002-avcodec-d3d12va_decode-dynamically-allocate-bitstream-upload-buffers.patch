@@ -1,0 +1,547 @@
+From 9997fd060680d427bcc0c0715d163346da7ebd6f Mon Sep 17 00:00:00 2001
+From: Wu Jianhua <toqsxw@outlook.com>
+Date: Thu, 27 Aug 2026 08:35:13 +0800
+Subject: [PATCH] avcodec/d3d12va_decode: dynamically allocate bitstream upload
+ buffers
+
+                    Frames  Before FPS  After FPS  Before Memory  After Memory  Before GPU Commit  After GPU Commit
+HEVC 3840x2160       11904      645.51     646.97    1024.63 MiB   764.11 MiB     676.05 MiB        413.59 MiB
+AV1  3840x2160        2880      383.19     383.40     286.05 MiB   204.57 MiB     209.66 MiB        139.25 MiB
+VP9  7680x4320       16504      166.14     165.94    2329.95 MiB  1372.44 MiB    2098.50 MiB       1147.08 MiB
+
+Signed-off-by: Wu Jianhua <toqsxw@outlook.com>
+---
+ libavcodec/d3d12va_av1.c    |  9 +---
+ libavcodec/d3d12va_decode.c | 88 +++++++++++++++++++++----------------
+ libavcodec/d3d12va_decode.h | 31 ++++---------
+ libavcodec/d3d12va_h264.c   | 15 +++----
+ libavcodec/d3d12va_hevc.c   | 17 +++----
+ libavcodec/d3d12va_mpeg2.c  |  9 +---
+ libavcodec/d3d12va_vc1.c    | 23 ++++------
+ libavcodec/d3d12va_vp9.c    |  9 +---
+ 8 files changed, 85 insertions(+), 116 deletions(-)
+
+diff --git a/libavcodec/d3d12va_av1.c b/libavcodec/d3d12va_av1.c
+index 73f77e04cf67a..6ebefb6c7cfe5 100644
+--- a/libavcodec/d3d12va_av1.c
++++ b/libavcodec/d3d12va_av1.c
+@@ -122,7 +122,6 @@ static int d3d12va_av1_decode_slice(AVCodecContext *avctx,
+ 
+ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *input_args, ID3D12Resource *buffer)
+ {
+-    D3D12VADecodeContext    *ctx          = D3D12VA_DECODE_CONTEXT(avctx);
+     const AV1DecContext     *h            = avctx->priv_data;
+     AV1DecodePictureContext *ctx_pic      = h->cur_frame.hwaccel_picture_private;
+     void *mapped_data;
+@@ -132,11 +131,6 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+     args->Size  = sizeof(DXVA_Tile_AV1) * ctx_pic->tile_count;
+     args->pData = ctx_pic->tiles;
+ 
+-    if (ctx_pic->bitstream_size > ctx->bitstream_size) {
+-        av_log(avctx, AV_LOG_ERROR, "Input frame bitstream size exceeds internal buffer!\n");
+-        return AVERROR(EINVAL);
+-    }
+-
+     input_args->CompressedBitstream = (D3D12_VIDEO_DECODE_COMPRESSED_BITSTREAM){
+         .pBuffer = buffer,
+         .Offset  = 0,
+@@ -165,7 +159,8 @@ static int d3d12va_av1_end_frame(AVCodecContext *avctx)
+         return -1;
+ 
+     ret = ff_d3d12va_common_end_frame(avctx, h->cur_frame.f, &ctx_pic->pp, sizeof(ctx_pic->pp),
+-                                      NULL, 0, update_input_arguments);
++                                      NULL, 0, ctx_pic->bitstream_size,
++                                      update_input_arguments);
+ 
+     return ret;
+ }
+diff --git a/libavcodec/d3d12va_decode.c b/libavcodec/d3d12va_decode.c
+index 538d9a4f6e8f3..39feb3a623b6b 100644
+--- a/libavcodec/d3d12va_decode.c
++++ b/libavcodec/d3d12va_decode.c
+@@ -27,7 +27,6 @@
+ #include "libavutil/log.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/time.h"
+-#include "libavutil/imgutils.h"
+ #include "libavutil/hwcontext_d3d12va_internal.h"
+ #include "libavutil/hwcontext_d3d12va.h"
+ #include "avcodec.h"
+@@ -147,12 +146,6 @@ static void prepare_reference_only_resources(AVCodecContext *avctx)
+     }
+ }
+ 
+-int ff_d3d12va_get_suitable_max_bitstream_size(AVCodecContext *avctx)
+-{
+-    AVHWFramesContext *frames_ctx = D3D12VA_FRAMES_CONTEXT(avctx);
+-    return av_image_get_buffer_size(frames_ctx->sw_format, avctx->coded_width, avctx->coded_height, 1);
+-}
+-
+ unsigned ff_d3d12va_get_surface_index(const AVCodecContext *avctx,
+                                       D3D12VADecodeContext *ctx, const AVFrame *frame,
+                                       int curr)
+@@ -190,26 +183,57 @@ unsigned ff_d3d12va_get_surface_index(const AVCodecContext *avctx,
+     return 0;
+ }
+ 
+-static int d3d12va_get_valid_helper_objects(AVCodecContext *avctx, ID3D12CommandAllocator **ppAllocator,
+-                                            ID3D12Resource **ppBuffer)
++static int d3d12va_resize_bitstream_buffer(AVCodecContext *avctx, ID3D12Resource **ppBuffer,
++                                           UINT64 bitstream_size)
+ {
+     HRESULT hr;
+     D3D12VADecodeContext *ctx = D3D12VA_DECODE_CONTEXT(avctx);
+-    HelperObjects obj = { 0 };
+     D3D12_HEAP_PROPERTIES heap_props = { .Type = D3D12_HEAP_TYPE_UPLOAD };
++    ID3D12Resource *buffer = NULL;
++    D3D12_RESOURCE_DESC desc;
+ 
+-    D3D12_RESOURCE_DESC desc = {
+-        .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
+-        .Alignment        = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+-        .Width            = ctx->bitstream_size,
+-        .Height           = 1,
+-        .DepthOrArraySize = 1,
+-        .MipLevels        = 1,
+-        .Format           = DXGI_FORMAT_UNKNOWN,
+-        .SampleDesc       = { .Count = 1, .Quality = 0 },
+-        .Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+-        .Flags            = D3D12_RESOURCE_FLAG_NONE,
+-    };
++    if (!bitstream_size)
++        return 0;
++
++    if (*ppBuffer) {
++        (*ppBuffer)->lpVtbl->GetDesc(*ppBuffer, &desc);
++        if (desc.Width >= bitstream_size)
++            return 0;
++    } else {
++        desc = (D3D12_RESOURCE_DESC) {
++            .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
++            .Alignment        = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
++            .Height           = 1,
++            .DepthOrArraySize = 1,
++            .MipLevels        = 1,
++            .Format           = DXGI_FORMAT_UNKNOWN,
++            .SampleDesc       = { .Count = 1, .Quality = 0 },
++            .Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
++            .Flags            = D3D12_RESOURCE_FLAG_NONE,
++        };
++    }
++    desc.Width = bitstream_size * 1.5;
++
++    hr = ID3D12Device_CreateCommittedResource(ctx->device_ctx->device, &heap_props, D3D12_HEAP_FLAG_NONE,
++                                              &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++                                              &IID_ID3D12Resource, (void **)&buffer);
++    if (FAILED(hr)) {
++        av_log(avctx, AV_LOG_ERROR, "Failed to create a new D3D12 bitstream buffer for uploading!\n");
++        return AVERROR(EINVAL);
++    }
++
++    D3D12_OBJECT_RELEASE(*ppBuffer);
++    *ppBuffer = buffer;
++
++    return 0;
++}
++
++static int d3d12va_get_valid_helper_objects(AVCodecContext *avctx, ID3D12CommandAllocator **ppAllocator,
++                                            ID3D12Resource **ppBuffer, UINT64 bitstream_size)
++{
++    HRESULT hr;
++    D3D12VADecodeContext *ctx = D3D12VA_DECODE_CONTEXT(avctx);
++    HelperObjects obj = { 0 };
+ 
+     if (av_fifo_peek(ctx->objects_queue, &obj, 1, 0) >= 0) {
+         uint64_t completion = ID3D12Fence_GetCompletedValue(ctx->sync_ctx.fence);
+@@ -217,7 +241,7 @@ static int d3d12va_get_valid_helper_objects(AVCodecContext *avctx, ID3D12Command
+             *ppAllocator = obj.command_allocator;
+             *ppBuffer    = obj.buffer;
+             av_fifo_read(ctx->objects_queue, &obj, 1);
+-            return 0;
++            return d3d12va_resize_bitstream_buffer(avctx, ppBuffer, bitstream_size);
+         }
+     }
+ 
+@@ -228,16 +252,7 @@ static int d3d12va_get_valid_helper_objects(AVCodecContext *avctx, ID3D12Command
+         return AVERROR(EINVAL);
+     }
+ 
+-    hr = ID3D12Device_CreateCommittedResource(ctx->device_ctx->device, &heap_props, D3D12_HEAP_FLAG_NONE,
+-                                              &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+-                                              &IID_ID3D12Resource, (void **)ppBuffer);
+-
+-    if (FAILED(hr)) {
+-        av_log(avctx, AV_LOG_ERROR, "Failed to create a new d3d12 buffer!\n");
+-        return AVERROR(EINVAL);
+-    }
+-
+-    return 0;
++    return d3d12va_resize_bitstream_buffer(avctx, ppBuffer, bitstream_size);
+ }
+ 
+ static int d3d12va_discard_helper_objects(AVCodecContext *avctx, ID3D12CommandAllocator *pAllocator,
+@@ -438,8 +453,6 @@ av_cold int ff_d3d12va_decode_init(AVCodecContext *avctx)
+     if (ret < 0)
+         goto fail;
+ 
+-    ctx->bitstream_size = ff_d3d12va_get_suitable_max_bitstream_size(avctx);
+-
+     ctx->ref_resources = av_calloc(ctx->max_num_ref, sizeof(*ctx->ref_resources));
+     if (!ctx->ref_resources)
+         return AVERROR(ENOMEM);
+@@ -460,7 +473,7 @@ av_cold int ff_d3d12va_decode_init(AVCodecContext *avctx)
+     if (!ctx->sync_ctx.event)
+         goto fail;
+ 
+-    ret = d3d12va_get_valid_helper_objects(avctx, &command_allocator, &buffer);
++    ret = d3d12va_get_valid_helper_objects(avctx, &command_allocator, &buffer, 0);
+     if (ret < 0)
+         goto fail;
+ 
+@@ -558,6 +571,7 @@ static inline int d3d12va_update_reference_frames_state(AVCodecContext *avctx, D
+ int ff_d3d12va_common_end_frame(AVCodecContext *avctx, AVFrame *frame,
+                               const void *pp, unsigned pp_size,
+                               const void *qm, unsigned qm_size,
++                              UINT64 bitstream_size,
+                               int(*update_input_arguments)(AVCodecContext *, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *, ID3D12Resource *))
+ {
+     int ret;
+@@ -648,7 +662,7 @@ int ff_d3d12va_common_end_frame(AVCodecContext *avctx, AVFrame *frame,
+     if (!qm)
+         input_args.NumFrameArguments = 1;
+ 
+-    ret = d3d12va_get_valid_helper_objects(avctx, &command_allocator, &buffer);
++    ret = d3d12va_get_valid_helper_objects(avctx, &command_allocator, &buffer, bitstream_size);
+     if (ret < 0)
+         goto fail;
+ 
+diff --git a/libavcodec/d3d12va_decode.h b/libavcodec/d3d12va_decode.h
+index c771004222a60..00340e860c4a5 100644
+--- a/libavcodec/d3d12va_decode.h
++++ b/libavcodec/d3d12va_decode.h
+@@ -95,11 +95,6 @@ typedef struct D3D12VADecodeContext {
+      */
+     UINT used_mask;
+ 
+-    /**
+-     * Bitstream size for each frame
+-     */
+-    UINT bitstream_size;
+-
+     /**
+      * The sync context used to sync command queue
+      */
+@@ -141,16 +136,6 @@ typedef struct D3D12VADecodeContext {
+ #define D3D12VA_DECODE_CONTEXT(avctx) ((D3D12VADecodeContext *)((avctx)->internal->hwaccel_priv_data))
+ #define D3D12VA_FRAMES_CONTEXT(avctx) ((AVHWFramesContext *)(avctx)->hw_frames_ctx->data)
+ 
+-/**
+- * @brief Get a suitable maximum bitstream size
+- *
+- * Creating and destroying a resource on d3d12 needs sync and reallocation, so use this function
+- * to help allocate a big enough bitstream buffer to avoid recreating resources when decoding.
+- *
+- * @return the suitable size
+- */
+-int ff_d3d12va_get_suitable_max_bitstream_size(AVCodecContext *avctx);
+-
+ /**
+  * @brief init D3D12VADecodeContext
+  *
+@@ -175,18 +160,20 @@ int ff_d3d12va_common_frame_params(AVCodecContext *avctx, AVBufferRef *hw_frames
+ /**
+  * @brief d3d12va common end frame
+  *
+- * @param avctx    codec context
+- * @param frame    current output frame
+- * @param pp       picture parameters
+- * @param pp_size  the size of the picture parameters
+- * @param qm       quantization matrix
+- * @param qm_size  the size of the quantization matrix
+- * @param callback update decoder-specified input stream arguments
++ * @param avctx           codec context
++ * @param frame           current output frame
++ * @param pp              picture parameters
++ * @param pp_size         the size of the picture parameters
++ * @param qm              quantization matrix
++ * @param qm_size         the size of the quantization matrix
++ * @param bitstream_size  required compressed-bitstream upload-buffer capacity in bytes
++ * @param callback        update decoder-specified input stream arguments
+  * @return Error code (ret < 0 if failed)
+  */
+ int ff_d3d12va_common_end_frame(AVCodecContext *avctx, AVFrame *frame,
+     const void *pp, unsigned pp_size,
+     const void *qm, unsigned qm_size,
++    UINT64 bitstream_size,
+     int(*)(AVCodecContext *, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *, ID3D12Resource *));
+ 
+ #endif /* AVCODEC_D3D12VA_DEC_H */
+diff --git a/libavcodec/d3d12va_h264.c b/libavcodec/d3d12va_h264.c
+index 5087e480f8ef6..a3031f67b34a5 100644
+--- a/libavcodec/d3d12va_h264.c
++++ b/libavcodec/d3d12va_h264.c
+@@ -105,7 +105,6 @@ static int d3d12va_h264_decode_slice(AVCodecContext *avctx, const uint8_t *buffe
+ #define START_CODE_SIZE 3
+ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *input_args, ID3D12Resource *buffer)
+ {
+-    D3D12VADecodeContext     *ctx             = D3D12VA_DECODE_CONTEXT(avctx);
+     const H264Context        *h               = avctx->priv_data;
+     const H264Picture        *current_picture = h->cur_pic_ptr;
+     H264DecodePictureContext *ctx_pic         = current_picture->hwaccel_picture_private;
+@@ -114,7 +113,6 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+     uint8_t *mapped_data, *mapped_ptr;
+     DXVA_Slice_H264_Short *slice;
+     D3D12_VIDEO_DECODE_FRAME_ARGUMENT *args;
+-    UINT bitstream_size = ctx->bitstream_size;
+ 
+     if (FAILED(ID3D12Resource_Map(buffer, 0, NULL, (void **)&mapped_data))) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to map D3D12 Buffer resource!\n");
+@@ -129,22 +127,14 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+         position = slice->BSNALunitDataLocation;
+         size     = slice->SliceBytesInBuffer;
+ 
+-        if (START_CODE_SIZE + (uint64_t)size > bitstream_size) {
+-            av_log(avctx, AV_LOG_ERROR, "Input frame bitstream size exceeds internal buffer!\n");
+-            ID3D12Resource_Unmap(buffer, 0, NULL);
+-            return AVERROR(EINVAL);
+-        }
+-
+         slice->SliceBytesInBuffer += START_CODE_SIZE;
+         slice->BSNALunitDataLocation = mapped_ptr - mapped_data;
+ 
+         *(uint32_t *)mapped_ptr = START_CODE;
+         mapped_ptr += START_CODE_SIZE;
+-        bitstream_size -= START_CODE_SIZE;
+ 
+         memcpy(mapped_ptr, &ctx_pic->bitstream[position], size);
+         mapped_ptr += size;
+-        bitstream_size -= size;
+     }
+ 
+     ID3D12Resource_Unmap(buffer, 0, NULL);
+@@ -170,13 +160,18 @@ static int d3d12va_h264_end_frame(AVCodecContext *avctx)
+     H264SliceContext          *sl      = &h->slice_ctx[0];
+ 
+     int ret;
++    uint64_t bitstream_size;
+ 
+     if (ctx_pic->slice_count <= 0 || ctx_pic->bitstream_size <= 0)
+         return -1;
+ 
++    bitstream_size = ctx_pic->bitstream_size +
++                     (uint64_t)ctx_pic->slice_count * START_CODE_SIZE;
++
+     ret = ff_d3d12va_common_end_frame(avctx, h->cur_pic_ptr->f,
+                                       &ctx_pic->pp, sizeof(ctx_pic->pp),
+                                       &ctx_pic->qm, sizeof(ctx_pic->qm),
++                                      bitstream_size,
+                                       update_input_arguments);
+     if (!ret)
+         ff_h264_draw_horiz_band(h, sl, 0, h->avctx->height);
+diff --git a/libavcodec/d3d12va_hevc.c b/libavcodec/d3d12va_hevc.c
+index 1bf1faf9cbe6e..1b73b2d0b6c50 100644
+--- a/libavcodec/d3d12va_hevc.c
++++ b/libavcodec/d3d12va_hevc.c
+@@ -101,7 +101,6 @@ static int d3d12va_hevc_decode_slice(AVCodecContext *avctx, const uint8_t *buffe
+ #define START_CODE_SIZE 3
+ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *input_args, ID3D12Resource *buffer)
+ {
+-    D3D12VADecodeContext     *ctx             = D3D12VA_DECODE_CONTEXT(avctx);
+     const HEVCContext        *h               = avctx->priv_data;
+     const HEVCFrame          *current_picture = h->cur_frame;
+     HEVCDecodePictureContext *ctx_pic         = current_picture->hwaccel_picture_private;
+@@ -110,7 +109,6 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+     uint8_t *mapped_data, *mapped_ptr;
+     DXVA_Slice_HEVC_Short *slice;
+     D3D12_VIDEO_DECODE_FRAME_ARGUMENT *args;
+-    UINT bitstream_size = ctx->bitstream_size;
+ 
+     if (FAILED(ID3D12Resource_Map(buffer, 0, NULL, (void **)&mapped_data))) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to map D3D12 Buffer resource!\n");
+@@ -125,22 +123,14 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+         position = slice->BSNALunitDataLocation;
+         size = slice->SliceBytesInBuffer;
+ 
+-        if (START_CODE_SIZE + (uint64_t)size > bitstream_size) {
+-            av_log(avctx, AV_LOG_ERROR, "Input frame bitstream size exceeds internal buffer!\n");
+-            ID3D12Resource_Unmap(buffer, 0, NULL);
+-            return AVERROR(EINVAL);
+-        }
+-
+         slice->SliceBytesInBuffer += START_CODE_SIZE;
+         slice->BSNALunitDataLocation = mapped_ptr - mapped_data;
+ 
+         *(uint32_t *)mapped_ptr = START_CODE;
+         mapped_ptr += START_CODE_SIZE;
+-        bitstream_size -= START_CODE_SIZE;
+ 
+         memcpy(mapped_ptr, &ctx_pic->bitstream[position], size);
+         mapped_ptr += size;
+-        bitstream_size -= size;
+     }
+ 
+     ID3D12Resource_Unmap(buffer, 0, NULL);
+@@ -165,12 +155,17 @@ static int d3d12va_hevc_end_frame(AVCodecContext *avctx)
+     HEVCDecodePictureContext *ctx_pic = h->cur_frame->hwaccel_picture_private;
+ 
+     int scale = ctx_pic->pp.dwCodingParamToolFlags & 1;
++    uint64_t bitstream_size;
+ 
+     if (ctx_pic->slice_count <= 0 || ctx_pic->bitstream_size <= 0)
+         return -1;
+ 
++    bitstream_size = ctx_pic->bitstream_size +
++                     (uint64_t)ctx_pic->slice_count * START_CODE_SIZE;
++
+     return ff_d3d12va_common_end_frame(avctx, h->cur_frame->f, &ctx_pic->pp, sizeof(ctx_pic->pp),
+-               scale ? &ctx_pic->qm : NULL, scale ? sizeof(ctx_pic->qm) : 0, update_input_arguments);
++               scale ? &ctx_pic->qm : NULL, scale ? sizeof(ctx_pic->qm) : 0,
++               bitstream_size, update_input_arguments);
+ }
+ 
+ static av_cold int d3d12va_hevc_decode_init(AVCodecContext *avctx)
+diff --git a/libavcodec/d3d12va_mpeg2.c b/libavcodec/d3d12va_mpeg2.c
+index de9f0c71d1847..cceca682c7c47 100644
+--- a/libavcodec/d3d12va_mpeg2.c
++++ b/libavcodec/d3d12va_mpeg2.c
+@@ -90,7 +90,6 @@ static int d3d12va_mpeg2_decode_slice(AVCodecContext *avctx, const uint8_t *buff
+ 
+ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *input_args, ID3D12Resource *buffer)
+ {
+-    D3D12VADecodeContext      *ctx          = D3D12VA_DECODE_CONTEXT(avctx);
+     const MpegEncContext      *s            = avctx->priv_data;
+     D3D12DecodePictureContext *ctx_pic      = s->cur_pic.ptr->hwaccel_picture_private;
+ 
+@@ -106,11 +105,6 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+         .End = ctx_pic->bitstream_size,
+     };
+ 
+-    if (ctx_pic->bitstream_size > ctx->bitstream_size) {
+-        av_log(avctx, AV_LOG_ERROR, "Input frame bitstream size exceeds internal buffer!\n");
+-        return AVERROR(EINVAL);
+-    }
+-
+     if (FAILED(ID3D12Resource_Map(buffer, 0, &range, &mapped_data))) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to map D3D12 Buffer resource!\n");
+         return AVERROR(EINVAL);
+@@ -152,7 +146,8 @@ static int d3d12va_mpeg2_end_frame(AVCodecContext *avctx)
+         return -1;
+ 
+     ret = ff_d3d12va_common_end_frame(avctx, s->cur_pic.ptr->f, &ctx_pic->pp, sizeof(ctx_pic->pp),
+-                                      &ctx_pic->qm, sizeof(ctx_pic->qm), update_input_arguments);
++                                      &ctx_pic->qm, sizeof(ctx_pic->qm), ctx_pic->bitstream_size,
++                                      update_input_arguments);
+     if (!ret)
+         ff_mpeg_draw_horiz_band(s, 0, avctx->height);
+ 
+diff --git a/libavcodec/d3d12va_vc1.c b/libavcodec/d3d12va_vc1.c
+index 2386d2a29bafe..53fc3955c3aaf 100644
+--- a/libavcodec/d3d12va_vc1.c
++++ b/libavcodec/d3d12va_vc1.c
+@@ -41,6 +41,8 @@ typedef struct D3D12DecodePictureContext {
+     unsigned               bitstream_size;
+ } D3D12DecodePictureContext;
+ 
++static const uint8_t vc1_start_code[] = { 0, 0, 1, 0x0d };
++
+ static int d3d12va_vc1_start_frame(AVCodecContext *avctx,
+                                    av_unused const AVBufferRef *buffer_ref,
+                                    av_unused const uint8_t *buffer,
+@@ -94,7 +96,6 @@ static int d3d12va_vc1_decode_slice(AVCodecContext *avctx, const uint8_t *buffer
+ 
+ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *input_args, ID3D12Resource *buffer)
+ {
+-    D3D12VADecodeContext      *ctx          = D3D12VA_DECODE_CONTEXT(avctx);
+     const VC1Context *v                     = avctx->priv_data;
+     const MpegEncContext      *s            = &v->s;
+     D3D12DecodePictureContext *ctx_pic      = s->cur_pic.ptr->hwaccel_picture_private;
+@@ -102,9 +103,6 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+ 
+     const unsigned mb_count = s->mb_width * (s->mb_height >> v->field_mode);
+     uint8_t *mapped_data, *mapped_ptr;
+-    UINT bitstream_size = ctx->bitstream_size;
+-
+-    static const uint8_t start_code[] = { 0, 0, 1, 0x0d };
+ 
+     if (FAILED(ID3D12Resource_Map(buffer, 0, NULL, (void **)&mapped_data))) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to map D3D12 Buffer resource!\n");
+@@ -117,12 +115,6 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+         unsigned position     = slice->dwSliceDataLocation;
+         unsigned size         = slice->dwSliceBitsInBuffer / 8;
+ 
+-        if ((uint64_t)size + ((avctx->codec_id == AV_CODEC_ID_VC1) ? sizeof(start_code) : 0) > bitstream_size) {
+-            av_log(avctx, AV_LOG_ERROR, "Input frame bitstream size exceeds internal buffer!\n");
+-            ID3D12Resource_Unmap(buffer, 0, NULL);
+-            return AVERROR(EINVAL);
+-        }
+-
+         slice->dwSliceDataLocation = mapped_ptr - mapped_data;
+         if (i < ctx_pic->slice_count - 1)
+             slice->wNumberMBsInSlice = slice[1].wNumberMBsInSlice - slice[0].wNumberMBsInSlice;
+@@ -130,20 +122,18 @@ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPU
+             slice->wNumberMBsInSlice = mb_count - slice[0].wNumberMBsInSlice;
+ 
+         if (avctx->codec_id == AV_CODEC_ID_VC1) {
+-            memcpy(mapped_ptr, start_code, sizeof(start_code));
++            memcpy(mapped_ptr, vc1_start_code, sizeof(vc1_start_code));
+             if (i == 0 && v->second_field)
+                 mapped_ptr[3] = 0x0c;
+             else if (i > 0)
+                 mapped_ptr[3] = 0x0b;
+ 
+-            mapped_ptr += sizeof(start_code);
+-            bitstream_size -= sizeof(start_code);
+-            slice->dwSliceBitsInBuffer += sizeof(start_code) * 8;
++            mapped_ptr += sizeof(vc1_start_code);
++            slice->dwSliceBitsInBuffer += sizeof(vc1_start_code) * 8;
+         }
+ 
+         memcpy(mapped_ptr, &ctx_pic->bitstream[position], size);
+         mapped_ptr += size;
+-        bitstream_size -= size;
+     }
+ 
+     ID3D12Resource_Unmap(buffer, 0, NULL);
+@@ -172,6 +162,9 @@ static int d3d12va_vc1_end_frame(AVCodecContext *avctx)
+     return ff_d3d12va_common_end_frame(avctx, v->s.cur_pic.ptr->f,
+                                        &ctx_pic->pp, sizeof(ctx_pic->pp),
+                                        NULL, 0,
++                                       ctx_pic->bitstream_size +
++                                       (avctx->codec_id == AV_CODEC_ID_VC1 ?
++                                        (uint64_t)ctx_pic->slice_count * sizeof(vc1_start_code) : 0),
+                                        update_input_arguments);
+ }
+ 
+diff --git a/libavcodec/d3d12va_vp9.c b/libavcodec/d3d12va_vp9.c
+index f224044279e53..d3f1c8d454894 100644
+--- a/libavcodec/d3d12va_vp9.c
++++ b/libavcodec/d3d12va_vp9.c
+@@ -88,18 +88,12 @@ static int d3d12va_vp9_decode_slice(AVCodecContext *avctx, const uint8_t *buffer
+ 
+ static int update_input_arguments(AVCodecContext *avctx, D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS *input_args, ID3D12Resource *buffer)
+ {
+-    D3D12VADecodeContext    *ctx     = D3D12VA_DECODE_CONTEXT(avctx);
+     const VP9SharedContext  *h       = avctx->priv_data;
+     VP9DecodePictureContext *ctx_pic = h->frames[CUR_FRAME].hwaccel_picture_private;
+ 
+     void *mapped_data;
+     D3D12_VIDEO_DECODE_FRAME_ARGUMENT *args;
+ 
+-    if (ctx_pic->slice.SliceBytesInBuffer > ctx->bitstream_size) {
+-        av_log(avctx, AV_LOG_ERROR, "Input frame bitstream size exceeds internal buffer!\n");
+-        return AVERROR(EINVAL);
+-    }
+-
+     if (FAILED(ID3D12Resource_Map(buffer, 0, NULL, &mapped_data))) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to map D3D12 Buffer resource!\n");
+         return AVERROR(EINVAL);
+@@ -132,7 +126,8 @@ static int d3d12va_vp9_end_frame(AVCodecContext *avctx)
+         return -1;
+ 
+     return ff_d3d12va_common_end_frame(avctx, h->frames[CUR_FRAME].tf.f,
+-               &ctx_pic->pp, sizeof(ctx_pic->pp), NULL, 0, update_input_arguments);
++               &ctx_pic->pp, sizeof(ctx_pic->pp), NULL, 0, ctx_pic->bitstream_size,
++               update_input_arguments);
+ }
+ 
+ static av_cold int d3d12va_vp9_decode_init(AVCodecContext *avctx)

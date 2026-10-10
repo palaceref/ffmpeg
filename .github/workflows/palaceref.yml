@@ -268,9 +268,16 @@ jobs:
             echo
             echo "BtbN's win64 LGPL shared build without its GPL components (chromaprint, FFTW, zvbi), built from this repository at ${GITHUB_SHA}."
             echo
+            if compgen -G "patches/ffmpeg/${FFTAG}/*.patch" >/dev/null; then
+              echo "FFmpeg is ${FFTAG} with these upstream commits applied, from \`patches/ffmpeg/${FFTAG}\`:"
+              for p in patches/ffmpeg/${FFTAG}/*.patch; do
+                echo "- $(head -1 "$p" | cut -d' ' -f2 | cut -c1-12) $(sed -n 's/^Subject: \[PATCH\] //p' "$p")"
+              done
+              echo
+            fi
             echo "SHA-256: \`$(sha256sum "$ZIP" | cut -d' ' -f1)\`"
             echo
-            echo "Source: \`source-ffmpeg-${FFTAG}.tar.gz\` is FFmpeg's; each other \`source-*.tar.xz\` is one library's, at the commit its scripts.d stage pins; the build recipes are this release's \"Source code\" archive."
+            echo "Source: \`source-ffmpeg-${FFTAG}.tar.gz\` is FFmpeg's at the tag, before the patches in the recipes; each other \`source-*.tar.xz\` is one library's, at the commit its scripts.d stage pins; the build recipes are this release's \"Source code\" archive."
           } > release_body.md
           gh release create "$TAGNAME" --target "$GITHUB_SHA" --title "FFmpeg ${FFTAG} for PalaceRef (${STAMP})" \
             --notes-file release_body.md "$ZIP" artifacts/checksums.sha256 sources/*
