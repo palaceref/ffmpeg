@@ -11,7 +11,7 @@ on the `palaceref` branch:
 - **Pinned.** FFmpeg is built from the `n8.1.3` tag (`addins/8.1.sh`), not the branch head;
   crosstool-NG and Rust are pinned to what BtbN used on 2026-09-24; every library stays at the
   commit its `scripts.d` stage pins.
-- **One build, kept.** `.github/workflows/build.yml` builds only that variant, fails if FFTW,
+- **One build, kept.** `.github/workflows/palaceref.yml` builds only that variant, fails if FFTW,
   chromaprint or zvbi reach the binaries, and on a manual run with "Publish release" releases it
   with FFmpeg's source and every library's source (`source-*`). Releases are never pruned: each is
   the source offer for a PalaceRef version that shipped it.
