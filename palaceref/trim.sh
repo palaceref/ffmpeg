@@ -81,4 +81,7 @@ palaceref_configure() {
     # null and checksum outputs use (verifying a build).
     FF_CONFIGURE+=" --disable-encoders --enable-encoder=ass,ssa,dvbsub,dvdsub,movtext,srt,subrip,text,ttml,webvtt,xsub,gif,apng,png,rawvideo,wrapped_avframe,pcm_s16le"
     FF_CONFIGURE+=" --disable-avdevice --disable-ffplay"
+    # iconv converts subtitle charsets (avcodec) and DVB service names in MPEG-TS
+    # (avformat). The libraries whose links brought libiconv along are gone.
+    FF_LIBS+=" -liconv"
 }
