@@ -1,7 +1,7 @@
 # FFmpeg for PalaceRef
 
 This fork of [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) builds the FFmpeg that
-PalaceRef ships: BtbN's `win64` `lgpl-shared` `8.1` build, from the same recipes, with four changes
+PalaceRef ships: BtbN's `win64` `lgpl-shared` `8.1` build, from the same recipes, with five changes
 on the `palaceref` branch:
 
 - **No GPL code in LGPL builds.** BtbN's LGPL variants linked FFTW (GPL, through chromaprint) into
@@ -19,10 +19,17 @@ on the `palaceref` branch:
   size, so NVIDIA decodes HEVC coded taller than shown, as NVENC's 3840x2176 for 2160p
   (`2e92077e2269`, backported without its P012 context); and hardware that needs reference-only
   surfaces no longer runs out of reference slots (`bcd2c69e087a`).
+- **Trimmed.** `palaceref/trim.sh` drops every library that nothing running the build reaches
+  (encoders, alternative decoders, other GPU APIs, filters' and protocols' libraries, devices),
+  each with its reason, and sets the configure: no autodetection, D3D12VA only, a short encoder
+  list, no avdevice, LGPL 2.1 or later. FFmpeg's own code stays whole. `util/vars.sh` loads it,
+  `generate.sh` asks `stage_enabled` instead of a stage's `ffbuild_enabled`, `download.sh` skips
+  dropped stages, and `addins/8.1.sh` applies the configure.
 - **One build, kept.** `.github/workflows/palaceref.yml` builds only that variant, fails if FFTW,
-  chromaprint or zvbi reach the binaries, and on a manual run with "Publish release" releases it
-  with FFmpeg's source and every library's source (`source-*`). Releases are never pruned: each is
-  the source offer for a PalaceRef version that shipped it.
+  chromaprint or zvbi reach the binaries or the build is not LGPL 2.1 or later, and on a manual run
+  with "Publish release" releases it with FFmpeg's source and the source of each library the build
+  used (`source-*`). Releases are never pruned: each is the source offer for a PalaceRef version
+  that shipped it.
 
 To update FFmpeg, merge BtbN's `master`, change the tag in `addins/8.1.sh`, push, and run the
 workflow with "Publish release"; then point PalaceRef's `scripts\ffmpeg-build.ps1` at the release.

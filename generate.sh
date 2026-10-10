@@ -49,7 +49,7 @@ exec_dockerstage() {
         source util/dl_functions.sh
         source "$SCRIPT"
 
-        ffbuild_enabled || exit 0
+        stage_enabled || exit 0
 
         to_df "ENV SELF=\"$SELF\" STAGENAME=\"$STAGENAME\""
 
@@ -80,7 +80,7 @@ get_stagedeps() {
             source util/dl_functions.sh
             source "$SCRIPT"
 
-            ffbuild_enabled || exit 0
+            stage_enabled || exit 0
             ffbuild_depends
         )
     fi
@@ -123,7 +123,7 @@ get_output() {
     (
         SELF="$1"
         source "$1"
-        if ffbuild_enabled; then
+        if stage_enabled; then
             ffbuild_$2 || exit 0
         else
             ffbuild_un$2 || exit 0
@@ -159,7 +159,7 @@ while true; do
         (
             SELF="$SCRIPT"
             source "$SCRIPT"
-            ffbuild_enabled || exit $?
+            stage_enabled || exit $?
             to_df "FROM ${BASELAYER} AS ${CURDEP}"
         ) || continue
 
@@ -169,7 +169,7 @@ while true; do
                 SELF="$SCRIPT"
                 SELFLAYER="$SUBDEP"
                 source "$SCRIPT"
-                ffbuild_enabled || exit 0
+                stage_enabled || exit 0
                 ffbuild_dockerlayer || exit $?
             )
         done
@@ -203,7 +203,7 @@ for SUBDEP in $(get_stagedeps_recursive "${ENTRYSCRIPT}"); do
         COMBINING="1"
         SELFLAYER="$SUBDEP"
         source "$SCRIPT"
-        ffbuild_enabled || exit 0
+        stage_enabled || exit 0
         ffbuild_dockerlayer || exit $?
         TODF="Dockerfile.final" PREVLAYER="$COMBINELAYER" \
             ffbuild_dockerfinal || exit $?

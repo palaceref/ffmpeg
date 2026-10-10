@@ -210,10 +210,18 @@ jobs:
           cd artifacts
           unzip -q -o ffmpeg-*.zip -d check
           found="$(grep -a -o -h -E 'fftw-3[0-9.]*|fftw_wisdom|Chromaprint|Libzvbi' check/*/bin/*.dll check/*/bin/*.exe | sort -u || true)"
+          # The configure line and licence every library embeds (palaceref/trim.sh).
+          flags="$(grep -a -o -h -E -- '--enable-(gpl|nonfree|version3)' check/*/bin/*.dll | sort -u || true)"
+          license="$(grep -a -c 'LGPL version 2.1 or later' check/*/bin/avutil-*.dll || true)"
           rm -rf check
           if [ -n "$found" ]; then
             echo "$found"
             echo "::error::GPL components found in the build"
+            exit 1
+          fi
+          if [ -n "$flags" ] || [ "$license" = 0 ]; then
+            echo "$flags"
+            echo "::error::The build is not LGPL 2.1 or later"
             exit 1
           fi
       - name: Upload artifacts
@@ -245,14 +253,18 @@ jobs:
           path: sources-archive
       - name: Gather sources
         # The LGPL asks that the source of what ships stay available: FFmpeg at
-        # its tag, and every library at the commit the build used (the download
-        # cache holds one archive per scripts.d stage). The recipes are this
+        # its tag, and every library at the commit the build used. The download
+        # cache holds an archive for every scripts.d stage; the build's
+        # Dockerfile names the ones it was made from. The recipes are this
         # repository at the release's tag.
         run: |
           set -e
           mkdir sources
           tar xzf sources-archive/cache.tar.gz
-          find .cache/downloads -type f -name '*.tar.xz' -exec sh -c 'cp "$1" "sources/source-$(basename "$1")"' _ {} \;
+          ./generate.sh "$TARGET" "$VARIANT" "$ADDIN"
+          for archive in $(grep -o 'src=\.cache/downloads/[^,]*\.tar\.xz' Dockerfile | cut -d= -f2 | sort -u); do
+            cp "$archive" "sources/source-$(basename "$archive")"
+          done
           FFTAG="$(sed -n 's/^GIT_BRANCH="\(.*\)"/\1/p' addins/${ADDIN}.sh)"
           curl -fsSL -o "sources/source-ffmpeg-${FFTAG}.tar.gz" "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFTAG}.tar.gz"
           echo "FFTAG=${FFTAG}" >> $GITHUB_ENV
@@ -267,7 +279,7 @@ jobs:
           {
             echo "FFmpeg ${FFTAG} for PalaceRef: \`$(basename "$ZIP")\`"
             echo
-            echo "BtbN's win64 LGPL shared build without its GPL components (chromaprint, FFTW, zvbi), built from this repository at ${GITHUB_SHA}."
+            echo "BtbN's win64 shared recipes, LGPL 2.1 or later, with FFmpeg's own code whole and only the libraries something running it reaches (\`palaceref/trim.sh\`), built from this repository at ${GITHUB_SHA}."
             echo
             if compgen -G "patches/ffmpeg/${FFTAG}/*.patch" >/dev/null; then
               echo "FFmpeg is ${FFTAG} with these upstream commits applied, from \`patches/ffmpeg/${FFTAG}\`:"

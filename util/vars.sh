@@ -146,3 +146,6 @@ ffbuild_libs() {
 ffbuild_unlibs() {
     return 0
 }
+
+# PalaceRef drops the stages palaceref/trim.sh lists.
+source "$(dirname "$BASH_SOURCE")/../palaceref/trim.sh"
