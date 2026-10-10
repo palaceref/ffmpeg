@@ -24,6 +24,11 @@ permissions:
   contents: write  # Releases.
   packages: write  # The build images in ghcr.io.
 
+# A newer build of the same branch replaces one still running.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   DOCKER_BUILDKIT: 1
   TARGET: win64
