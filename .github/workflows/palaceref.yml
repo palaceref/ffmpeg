@@ -271,7 +271,10 @@ jobs:
             if compgen -G "patches/ffmpeg/${FFTAG}/*.patch" >/dev/null; then
               echo "FFmpeg is ${FFTAG} with these upstream commits applied, from \`patches/ffmpeg/${FFTAG}\`:"
               for p in patches/ffmpeg/${FFTAG}/*.patch; do
-                echo "- $(head -1 "$p" | cut -d' ' -f2 | cut -c1-12) $(sed -n 's/^Subject: \[PATCH\] //p' "$p")"
+                # A backport names the upstream commit it was picked from.
+                SHA="$(sed -n 's/^(cherry picked from commit \([0-9a-f]*\).*/\1/p' "$p")"
+                [[ -n "$SHA" ]] || SHA="$(head -1 "$p" | cut -d' ' -f2)"
+                echo "- ${SHA:0:12} $(sed -n 's/^Subject: \[PATCH\] //p' "$p")"
               done
               echo
             fi

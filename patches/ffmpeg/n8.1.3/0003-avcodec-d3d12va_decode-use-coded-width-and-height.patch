@@ -1,0 +1,41 @@
+From 0945bd17eab541f9fd4fc71d3ea6aa1b94628885 Mon Sep 17 00:00:00 2001
+From: Wu Jianhua <toqsxw@outlook.com>
+Date: Thu, 27 Aug 2026 05:50:00 +0800
+Subject: [PATCH] avcodec/d3d12va_decode: use coded width and height
+
+HEVC decoders write the full coded surface before applying the conformance window, so D3D12VA must allocate coded_width and coded_height rather than the visible frame dimensions.
+
+SPS:
+pic_width_in_luma_samples  = 3840
+pic_height_in_luma_samples = 2176
+conformance_window_flag    = 1
+conf_win_bottom_offset     = 8
+
+For 4:2:0, the bottom offset crops 16 luma samples, yielding a 3840x2160 display frame. Allocating the visible 3840x2160 surface failed on NVIDIA D3D12VA; using 3840x2176 decoded all 744 frames on an RTX 5080 with zero decode errors.
+
+Signed-off-by: Wu Jianhua <toqsxw@outlook.com>
+
+(cherry picked from commit 2e92077e22699b581a107565de0297dd5e7762fa, without the
+P012 context of fe953596e9f5, which n8.1.3 lacks)
+---
+ libavcodec/d3d12va_decode.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/d3d12va_decode.c b/libavcodec/d3d12va_decode.c
+index b23a21a..9392d60 100644
+--- a/libavcodec/d3d12va_decode.c
++++ b/libavcodec/d3d12va_decode.c
+@@ -407,8 +407,8 @@ int ff_d3d12va_common_frame_params(AVCodecContext *avctx, AVBufferRef *hw_frames
+ 
+     frames_ctx->format    = AV_PIX_FMT_D3D12;
+     frames_ctx->sw_format = avctx->sw_pix_fmt == AV_PIX_FMT_YUV420P10 ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+-    frames_ctx->width     = avctx->width;
+-    frames_ctx->height    = avctx->height;
++    frames_ctx->width     = avctx->coded_width;
++    frames_ctx->height    = avctx->coded_height;
+ 
+     return 0;
+ }
+-- 
+2.55.0.windows.5
+

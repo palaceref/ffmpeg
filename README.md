@@ -13,8 +13,10 @@ on the `palaceref` branch:
   commit its `scripts.d` stage pins.
 - **Upstream fixes.** `patches/ffmpeg/<tag>` holds FFmpeg commits from upstream `master` that the
   tag lacks, as `git format-patch` files; `build.sh` applies them, uncommitted, so the version stays
-  the tag's. For `n8.1.3`: the D3D12 decoder sizes its bitstream upload buffers to each frame
-  (`9997fd060680`; each was a whole uncompressed frame), and hardware that needs reference-only
+  the tag's. For `n8.1.3`, three D3D12 decoder fixes: it sizes its bitstream upload buffers to
+  each frame (`9997fd060680`; each was a whole uncompressed frame); its surfaces take the coded
+  size, so NVIDIA decodes HEVC coded taller than shown, as NVENC's 3840x2176 for 2160p
+  (`2e92077e2269`, backported without its P012 context); and hardware that needs reference-only
   surfaces no longer runs out of reference slots (`bcd2c69e087a`).
 - **One build, kept.** `.github/workflows/palaceref.yml` builds only that variant, fails if FFTW,
   chromaprint or zvbi reach the binaries, and on a manual run with "Publish release" releases it
