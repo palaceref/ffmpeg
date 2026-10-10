@@ -274,7 +274,9 @@ jobs:
                 # A backport names the upstream commit it was picked from.
                 SHA="$(sed -n 's/^(cherry picked from commit \([0-9a-f]*\).*/\1/p' "$p")"
                 [[ -n "$SHA" ]] || SHA="$(head -1 "$p" | cut -d' ' -f2)"
-                echo "- ${SHA:0:12} $(sed -n 's/^Subject: \[PATCH\] //p' "$p")"
+                # The subject header may continue on indented lines.
+                SUBJECT="$(awk '/^Subject: /{s=substr($0,10); while ((getline l) > 0 && l ~ /^ /) s=s l; print s; exit}' "$p")"
+                echo "- ${SHA:0:12} ${SUBJECT#\[PATCH\] }"
               done
               echo
             fi
