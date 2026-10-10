@@ -38,7 +38,8 @@ env:
 jobs:
   build_base:
     name: Build base image
-    if: ${{ github.event.inputs.buildOnly != 'true' }}
+    # Also for a release: this job collects the libraries' sources it publishes.
+    if: ${{ github.event.inputs.buildOnly != 'true' || github.event.inputs.doRelease == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
